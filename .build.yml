@@ -30,7 +30,7 @@ secrets:
   - 8e41f94c-743c-43ab-938b-45ae1a6caed9
 
   # heptapod api, ~/.heptapod.create.repo
-  - ba779ef7-a6d2-4098-a345-7e801dd8b088a
+  - ba779ef7-a6d2-4098-a345-7e801dd8b088
 
 # Note that SSH keys are reference IDs, not the secrets themselves
 environment:
