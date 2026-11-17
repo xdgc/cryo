@@ -46,10 +46,10 @@ tasks:
       ./.hut/convert-hg-git
 
   - git-push-github: |
-      ./.hut/git-push-github
+      ./.hut/push-github
 
   - git-push-gitlab: |
-      ./.hut/git-push-gitlab
+      ./.hut/push-gitlab
 
   - git-push-heptapod: |
-      ./.hut/git-push-heptapod
+      ./.hut/push-heptapod
