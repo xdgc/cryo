@@ -59,7 +59,7 @@ clean:
 install: release
     {{ sudo }} install -D -m 755 {{ bin }} {{ bindir }}/cryo
     {{ sudo }} install -D -m 644 man/cryo.1 {{ mandir }}/cryo.1
-    {{ sudo }} install -D -m 644 cryo.md {{ docdir }}/cryo.md
+    {{ sudo }} install -D -m 644 historical/cryo.md {{ docdir }}/cryo.md
     {{ sudo }} install -D -m 644 systemd/cryo.service {{ unitdir }}/cryo.service
     [ -n "{{ destdir }}" ] || {{ sudo }} systemctl daemon-reload
 
