@@ -1,0 +1,526 @@
+.\" vim: ts=4 et
+.TH CRYO 1 "2026-11-17" "cryo 0.1.0" "User Commands"
+.SH NAME
+cryo \- zfs snapshot lifecycle maintenance and replication
+.SH SYNOPSIS
+.B cryo
+.RI [ options ]
+.I subcommand
+.br
+.B cryo
+.RI [ options ]
+.B replicate
+.I dataset target
+.SH DESCRIPTION
+.B cryo
+takes periodic and ad-hoc snapshots of zfs datasets, manages their
+retention, and replicates them to other hosts, pools, or plain files.
+It has
+.B no configuration files
+and no subcommand for editing policy. Everything it does is driven
+entirely by
+.B cryo:*
+zfs user properties, read and written with the ordinary
+.BR "zfs get" / "zfs set" / "zfs inherit" ,
+the same as any other zfs property. There is nothing to install
+alongside it, nothing to keep in sync, and nothing that goes stale
+when a pool moves to another machine \(em the policy travels with the
+pool.
+.PP
+.B cryo
+is fully automated: it discovers what to act on by walking
+.B cryo:*
+properties across every imported pool on the host. A dataset with none
+set, directly or by inheritance, is simply left alone. There is no
+flag or argument anywhere in
+.BR cryo 's
+own command line for naming a dataset to act on \(em the properties
+.I are
+the selection mechanism.
+.PP
+This page documents how to drive an already-installed
+.BR cryo .
+It does not explain why it's built the way it is; that rationale,
+along with the wire protocol and claims-model internals, lives in the
+.B cryo.md
+design document shipped alongside it (see
+.B FILES
+below).
+.SH OPTIONS
+.TP
+.BR \-\-man
+Display this manual page: the embedded roff source, formatted and
+piped through a pager, if standard output is a terminal; otherwise the
+raw roff source (suitable for redirecting to a
+.B .1
+file) is written to standard output and nothing is formatted.
+.TP
+.BR \-d ",  \fB\-\-debug\fR"
+Enable debugging output.
+.TP
+.BR \-V ",  \fB\-\-version\fR"
+Print the version number and exit.
+.TP
+.BR \-h ",  \fB\-\-help\fR"
+Print a short usage summary and exit.
+.SH SUBCOMMANDS
+.TP
+.B daemon
+Run continuously (the normal way to run
+.BR cryo ).
+Keeps every discovered policy, schedule, and snapshot claim in memory;
+computes the single earliest next action across everything it manages
+and sleeps until then, rather than polling on a fixed interval; and
+answers
+.BR run / status / resync / stop
+from any other
+.B cryo
+invocation over a local control socket, from that same cached state,
+instead of re-scanning zfs for every request. See
+.BR "EXECUTION MODEL" .
+.TP
+.B run
+Evaluate whatever's due right now \(em snapshots to take, claims to
+expire, replication targets to catch up \(em across everything
+discovered, then exit. Prefers a running daemon's cached state if one
+is reachable (asking it to do the work and reporting what it did);
+otherwise scans zfs directly and does the work itself. This is the
+fallback for driving
+.B cryo
+from
+.BR cron (8)
+instead of running it as a daemon.
+.TP
+.B status
+Read-only report of every discovered policy (with its schedule and
+whether it's local or inherited), configured limit/reserve, configured
+replication target, and existing cryo-managed snapshot with its
+current claims. Same daemon-cache-or-direct-scan preference as
+.BR run .
+Useful on its own, and as a quick check that a property you just set
+parsed the way you expected.
+.TP
+.B resync
+Ask a running daemon to immediately re-scan zfs in full, instead of
+waiting for its own periodic interval. Only meaningful against a
+running daemon; fails if none is reachable. Runs in the background on
+the daemon's side \(em
+.B resync
+returns once that scan completes, but the daemon keeps answering other
+requests from its old state in the meantime.
+.TP
+.B stop
+Ask a running daemon to shut down cleanly: it finishes handling this
+request, removes its own control socket, and exits. Only meaningful
+against a running daemon; fails if none is reachable. This is the
+graceful-shutdown path \(em
+.B cryo daemon
+has no signal handling of its own, so a plain
+.BR kill (1)
+just terminates it mid-whatever-it-was-doing instead.
+.TP
+.BI replicate " dataset target"
+One-shot replication: sends
+.I dataset Ns' s
+latest cryo-managed snapshot (incrementally, if the two ends share a
+common one) to
+.IR target ,
+specified directly on the command line rather than read from a
+.B cryo:target
+property.
+.I target
+uses exactly the same grammar as that property's value; see
+.BR "REPLICATION TARGETS" .
+Useful for a first sync, a manual catch-up, or testing a target spec
+before committing it to a property.
+.TP
+.B server
+Speaks
+.BR cryo 's
+wire protocol on stdin/stdout, as the receiving side of a replication
+session. This is what the ssh/pipe/local transports invoke on the
+other end \(em there's no reason to run it by hand.
+.SH "SNAPSHOT POLICIES"
+A snapshot policy is a
+.B cryo:snapshot
+property, or
+.BR cryo:snapshot\- Ns\fIname\fR
+for an additional, independently-scheduled policy on the same
+dataset (any number of letters/digits/underscores for
+.IR name ).
+A dataset can carry as many of these as needed \(em a baseline
+.B cryo:snapshot
+plus, say, a
+.B cryo:snapshot\-daily
+and a
+.BR cryo:snapshot\-offsite .
+Like any zfs property, a policy set higher in the dataset tree is
+inherited by everything below it until a descendant sets (or
+.BR "zfs inherit" s)
+its own.
+.PP
+A policy's value is
+.IB frequency / retention \fR.
+.TP
+.I frequency
+One or more number-letter pairs with no separator: \fB15m\fR,
+\fB1h\fR, \fB1w3d\fR. Units are
+.B m
+(minutes),
+.B h
+(hours),
+.B d
+(days), and
+.B w
+(weeks) only \(em nothing else is accepted, because every other unit is
+either too short to matter or ambiguous (a month or a year is not a
+fixed number of seconds).
+.TP
+.I retention
+Either a bare integer (keep that many of the most recent snapshots
+this policy still claims), a duration in the same notation as
+.IR frequency \fR
+(keep whatever's within that age), or the literal word
+.B indefinite
+(synonym:
+.BR * ),
+meaning keep forever \(em subject to the space-pressure carve\-out in
+.BR "SPACE LIMITS" .
+.PP
+If more than one policy on a dataset comes due at the same moment,
+.B cryo
+takes a single snapshot that satisfies all of them, not one per
+policy. A snapshot is destroyed exactly when
+.I no
+policy still needs it to exist; as long as even one policy's retention
+still covers it, it stays, regardless of what any other policy claiming
+it would have decided on its own.
+.PP
+Examples:
+.nf
+.ft B
+zfs set cryo:snapshot=15m/8h tank/data
+zfs set cryo:snapshot\-daily=1d/30 tank/data
+zfs set cryo:snapshot\-archive=1w/indefinite tank/data
+zfs inherit cryo:snapshot\-daily tank/data/scratch
+.ft R
+.fi
+The first line snapshots every 15 minutes and keeps 8 hours' worth. The
+second, once a day, keeping the most recent 30. The third, weekly,
+forever (space permitting). The fourth opts
+.B tank/data/scratch
+back out of the inherited daily policy, falling back to whatever
+.B tank/data
+itself would otherwise have been inheriting for that name from further
+up the tree.
+.PP
+Snapshots are named
+.BI dataset @cryo\- YYYYMMDD.HHMMSS
+\(em the name carries no policy identity, only when it was taken, since
+what matters for keeping it around is never "which cadence produced
+this" but "does anything still need it." A manually-created snapshot
+named
+.BI dataset @cryo\-instant\- YYYYMMDD.HHMMSS
+(create it yourself with
+.BR "zfs snapshot" ;
+.B cryo
+has no command of its own for this, by the same no-dataset-argument
+design as everything else) is recognized but never auto-expired \(em
+delete it yourself with
+.B "zfs destroy"
+when it's no longer needed.
+.SH "SPACE LIMITS"
+Two independent, optional escape valves exist for
+.B indefinite
+retention, so it doesn't have to mean "fill the disk":
+.TP
+.B cryo:limit
+A dataset property (inheritable, like everything else): a size ceiling
+on that dataset plus all its own snapshots. Once exceeded,
+.B cryo
+destroys snapshots oldest-first \(em but only ones every remaining
+claim on which is
+.BR indefinite ;
+one still covered by a time- or count-based policy is never touched
+this way, no matter how far over the limit the dataset is.
+.TP
+.B cryo:reserve
+A pool property (read only from the pool's own root dataset \(em
+setting it on a child has no effect, even though it's visible there
+too by ordinary inheritance). A minimum amount of free space to
+maintain on the whole pool. When it's specified as a single value,
+that's both the trigger and the target: free space dropping below it
+starts cleanup, which continues until free space is back at or above
+it. Specified as a
+.IB high : low
+pair instead, the smaller value
+.RI ( low )
+is the trigger and the larger
+.RI ( high )
+is the target \(em cleanup runs further than the bare minimum,
+on purpose, so it doesn't immediately re-trigger the moment it stops.
+Pressure from
+.B cryo:reserve
+is pool-wide: the next snapshot it reclaims is the oldest eligible one
+.I anywhere in the pool
+it applies to, not the oldest within whichever dataset happens to be
+over some local limit.
+.PP
+Sizes take an optional suffix: lowercase is decimal (\fBk\fR=1000,
+\fBm\fR=10\(ha6, \fBg\fR=10\(ha9, \fBt\fR=10\(ha12); uppercase is binary
+(\fBK\fR=1024, \fBM\fR=1024\(ha2, \fBG\fR=1024\(ha3, \fBT\fR=1024\(ha4);
+no suffix means bytes.
+.nf
+.ft B
+zfs set cryo:limit=500G tank/data
+zfs set cryo:reserve=50G tank
+zfs set cryo:reserve=60G:40G tank
+.ft R
+.fi
+.SH "REPLICATION TARGETS"
+A replication target is a
+.B cryo:target
+property, or
+.BR cryo:target\- Ns\fIname\fR
+for an additional one on the same dataset \(em same naming rules and
+inheritance as snapshot policies. Every target configured on a
+dataset is kept caught up automatically, every cycle a daemon or a
+.B run
+evaluates that dataset: whatever cryo-managed snapshot is newest gets
+sent, incrementally if the two ends already share a common one,
+whenever it isn't already there. There's no separate schedule for
+replication \(em it simply tracks whatever snapshot policy produces.
+.PP
+A target's value is
+.RB [ endpoint : ] path
+.RB [ transport : detail ].
+.TP
+.I path
+If it begins with a letter, it's a zfs dataset path on the target side
+(local or remote, per
+.IR endpoint ).
+If it begins with
+.B .
+or
+.BR / ,
+it's a filesystem location instead: see
+.B "VFS (FILE) TARGETS"
+below. If omitted entirely, the target uses the same path as the
+source dataset.
+.TP
+.I endpoint
+A hostname, or an alias from
+.BR ssh_config (5).
+If present, the default transport is ssh, invoking
+.B "ssh " Ns\fIendpoint\fR " cryo server"
+on the other end \(em tune ssh's own behavior (keys, ports, jump
+hosts, keepalives) through
+.B ~/.ssh/config
+rather than through
+.BR cryo .
+If absent, the target is local, and no transport is needed at all.
+.TP
+.I transport
+Normally inferred from whether
+.I endpoint
+is present (ssh if so, local if not), but can be given explicitly
+after a space:
+.BR ssh: ,
+.BI pipe: command
+(runs
+.I command
+as a shell command line that's expected to connect to a
+.B "cryo server"
+on the other end \(em useful for a jump host, a VPN, or anything
+.B ssh
+alone can't express), or
+.BR local: .
+.PP
+Examples:
+.nf
+.ft B
+zfs set cryo:target=backup/data tank/data
+zfs set cryo:target\-offsite=backuphost:archive/data tank/data
+zfs set cryo:target\-relay='relay:archive/data pipe:ssh \-J jump relay cryo server' tank/data
+.ft R
+.fi
+.PP
+An encrypted source dataset is always sent raw
+.RB ( "zfs send \-w" ) :
+the target never needs the encryption key for anything
+.B cryo
+does to it, including its own snapshot lifecycle management on the
+replica side. Two consequences of that are expected behavior, not
+bugs: a key rotation
+.RB ( "zfs change\-key" )
+forces the next replication of that dataset to be a fresh full send
+rather than an incremental one, and the replica is not independently
+readable without the key being supplied there separately.
+.PP
+An interrupted transfer resumes automatically on the next attempt,
+using zfs's own resume tokens, rather than restarting from scratch \(em
+there's nothing to configure for this; it's detected and used whenever
+one is pending.
+.PP
+A replication target records where it came from in a
+.B cryo:origin
+property, set on the replica dataset and its snapshots, carrying the
+source's real hostname and the source pool's and dataset's zfs GUIDs.
+If a later replication attempt's identity doesn't match what's already
+recorded there, it's refused outright \(em most likely a
+misconfiguration, a rebuilt source, or an unrelated dataset that
+happens to share a name, never silently overwritten.
+.B cryo
+never snapshots a dataset of non-local origin on its own initiative; it
+still manages the lifecycle of whatever snapshots are already on it,
+per whatever policy properties are set there (typically its
+.I own
+cryo instance's policy, configured separately from whatever produced
+them on the source side).
+.SH "VFS (FILE) TARGETS"
+When a target's path begins with
+.B .
+or
+.BR / ,
+there's no
+.B "cryo server"
+on the other end at all \(em
+.B cryo
+writes the raw
+.B "zfs send"
+stream straight to a file:
+.IB path /dataset/ snapshot-name\fR.zfs\fR,
+mirroring the dataset's own path as nested directories. Before sending
+anything, it looks at what's already in that directory (instead of
+asking a peer) to find the newest snapshot both ends already have, for
+an incremental send; a file is written first under a
+.B .partial
+sibling name and renamed into place only once the send has actually
+finished, so an interrupted write can never be mistaken later for a
+valid baseline. These files are ordinary zfs send streams \(em replay
+one anywhere with a plain
+.BR "zfs receive" .
+There's no peer to check identity against, so none of the
+.B cryo:origin
+tracking above applies on this path.
+.SH "EXECUTION MODEL"
+.B cryo daemon
+is the normal way to run this: a single long-lived process, with no
+double-fork/detach of its own (whatever starts it \(em a service
+manager, typically \(em owns backgrounding it). On startup it scans
+every imported pool once, then computes the earliest next action across
+every policy it found and sleeps until then, rather than polling
+blindly. It re-scans from scratch periodically on a fixed safety-net
+interval regardless of anything else, and optionally wakes early on a
+.BR zpool (8)
+events hook so a
+.B "zfs set cryo:..."
+is picked up promptly \(em but that's purely a responsiveness
+optimization, never something correctness depends on.
+.PP
+A running daemon exposes a local control socket that every other
+.B cryo
+invocation checks first.
+.BR run / status
+become small requests answered from the daemon's cached state instead
+of a fresh scan, if one is reachable there; otherwise they fall back to
+scanning and acting directly, exactly as if no daemon were running at
+all.
+.BR resync / stop
+only ever make sense against a running daemon and fail cleanly if
+none is reachable.
+.PP
+.B cryo run
+is the alternative for anyone who'd rather drive this from
+.BR cron (8)
+than run a persistent process: it does one pass of whatever's due,
+then exits, with no socket and no caching involved.
+.SH EXAMPLES
+.nf
+.ft B
+# set a baseline policy and watch it get discovered correctly
+zfs set cryo:snapshot=1h/24 tank/data
+cryo status
+
+# run the daemon in a terminal to watch it work (normally a service manager does this)
+cryo daemon
+
+# ask it to pick up a property change immediately, rather than waiting
+cryo resync
+
+# shut the daemon down cleanly
+cryo stop
+
+# drive everything from cron instead
+*/15 * * * *  cryo run
+
+# add a replication target, then prove it out once by hand before relying on it
+zfs set cryo:target=backuphost:archive/data tank/data
+cryo replicate tank/data backuphost:archive/data
+.ft R
+.fi
+.SH ENVIRONMENT
+.TP
+.B CRYO_SOCKET
+Overrides the local control socket path a daemon binds (and every
+other invocation looks for first). Defaults to
+.BI $XDG_RUNTIME_DIR /cryo.sock
+if that's set, otherwise
+.BI /tmp/cryo\- user .sock\fR.
+A packaged systemd unit typically sets this explicitly to a
+service-managed path such as
+.BR /run/cryo/cryo.sock .
+.SH FILES
+None \(em by design.
+.B cryo
+has no configuration files; all configuration and state lives in
+.B cryo:*
+zfs user properties, which travel with the pool itself. The one
+runtime file it creates is the control socket named by
+.B CRYO_SOCKET
+above, removed again on a clean
+.BR "cryo stop" .
+.PP
+If installed alongside the standard documentation path, the full
+design document \(em the wire protocol, the claims-model internals,
+and the reasoning behind every choice summarized in this page \(em is
+at
+.BR /usr/local/share/doc/cryo/cryo.md " (or the equivalent under whatever " \-\-prefix " it was installed with)."
+.SH "EXIT STATUS"
+.TP
+.B 0
+Success.
+.TP
+.I nonzero
+Failure: a property failed to parse, a zfs command failed, a
+requested daemon
+.RB ( resync / stop )
+wasn't reachable, or a replication attempt failed. The message on
+standard error describes which.
+.SH "PRIVILEGE AND SECURITY"
+.B cryo
+has no authorization layer of its own. The entire trust boundary is
+external to it: whoever can reach
+.B "cryo server"
+(by ssh, by a pipe transport, or locally) as a given user, and whatever
+that user's
+.BR "zfs allow" (8)
+or sudo grants permit, is implicitly authorized to do whatever
+.B cryo
+does on their behalf. Running the daemon as root is simplest when it's
+meant to discover and manage every pool on a host; delegating specific
+permissions
+.RB ( create ", " destroy ", " mount ", " receive ", "
+.RB  rollback ", " send ", " snapshot ", " userprop )
+to an unprivileged user via
+.B "zfs allow"
+on just the pools it should touch is the alternative, if running
+as root isn't acceptable.
+.SH "SEE ALSO"
+.BR zfs (8),
+.BR zpool (8),
+.BR zfs\-allow (8),
+.BR ssh_config (5),
+.BR cron (8)
+.SH AUTHOR
+David Champion <dgc@c13.us>

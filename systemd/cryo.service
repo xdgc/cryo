@@ -1,0 +1,54 @@
+[Unit]
+Description=cryo zfs snapshot lifecycle and replication daemon
+Documentation=file:///usr/local/share/doc/cryo/cryo.md
+# Pools have to actually be imported (and, for VFS targets and any
+# dataset cryo itself mounts, mounted) before an initial discover()
+# means anything. zfs-mount.service pulls in zfs-import.target for
+# us, so depending on it is enough without hand-listing each one.
+After=zfs-mount.service
+Wants=zfs-mount.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cryo daemon
+# "cryo daemon" has no signal handling of its own -- a bare SIGTERM
+# just kills it mid-whatever-it-was-doing, same as any other unhandled
+# signal. The real clean-shutdown path is the local control socket
+# (cryo.md, "Execution model"): "cryo stop" sends a STOP request, the
+# daemon finishes handling it and exits on its own, removing the
+# socket file itself. Routing ExecStop through that instead of a
+# raw kill signal is what makes `systemctl stop cryo` graceful instead
+# of abrupt. If this can't reach the daemon for some reason, systemd's
+# own TimeoutStopSec fallback (SIGTERM, then SIGKILL) still applies.
+ExecStop=/usr/local/bin/cryo stop
+TimeoutStopSec=30
+
+# A fresh, tmpfs-backed, service-lifecycle-managed home for the
+# control socket -- avoids depending on $XDG_RUNTIME_DIR, which
+# plain system services (as opposed to user sessions) don't normally
+# get, and avoids /tmp, which isn't this daemon's to manage the
+# lifetime of. RuntimeDirectory=cryo creates/owns /run/cryo for the
+# unit's lifetime; CRYO_SOCKET just has to agree with that path.
+RuntimeDirectory=cryo
+Environment=CRYO_SOCKET=/run/cryo/cryo.sock
+
+# Runs as root by default: cryo.md's own privilege model delegates
+# all authorization to whatever user it runs as (no layer of its
+# own), and a daemon that's meant to discover and manage *every*
+# imported pool, not just ones it's been separately delegated on,
+# needs that breadth. To run as an unprivileged user instead, grant
+# it explicitly on every pool cryo should touch (zfs allow -u <user>
+# create,destroy,mount,receive,rollback,send,snapshot,userprop
+# <pool>), set User=/Group= below, and drop this comment block.
+#User=cryo
+#Group=cryo
+
+NoNewPrivileges=true
+
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
