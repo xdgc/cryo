@@ -21,7 +21,7 @@ secrets:
   - 2d5edb98-1b22-4ccd-8540-a4ff88147ad0
 
   # heptapod ssh
-  - 5f482fa0-ae99-4959-af51-1815a2e00fd7now
+  - 5f482fa0-ae99-4959-af51-1815a2e00fd7
 
   # gitlab api, ~/.gitlab.create.repo
   - 5b084237-cc8f-481f-b163-4fc2c18cb5a5
@@ -45,11 +45,11 @@ tasks:
   - convert-hg-git: |
       ./.hut/convert-hg-git
 
-  - git-push-github: |
+  - push-github: |
       ./.hut/push-github
 
-  - git-push-gitlab: |
+  - push-gitlab: |
       ./.hut/push-gitlab
 
-  - git-push-heptapod: |
+  - push-heptapod: |
       ./.hut/push-heptapod
