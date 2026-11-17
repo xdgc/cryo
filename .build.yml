@@ -1,0 +1,42 @@
+#
+# sr.ht build trigger
+# 
+# This .build.yml will ensure sync to gitlab/github, whether
+# the source repo is git or mercurial
+#
+image: alpine/edge
+packages:
+  - mercurial
+  - git
+  - python3
+  - jq
+  - openssh-client
+
+# Note that secrets are reference IDs, not the secrets themselves
+secrets:
+  # gitlab ssh
+  - 7118a2fc-e9dc-422a-a5d0-7050a29dfac7
+
+  # github ssh
+  - 2d5edb98-1b22-4ccd-8540-a4ff88147ad0
+
+  # gitlab api, ~/.gitlab.create.repo
+  - 5b084237-cc8f-481f-b163-4fc2c18cb5a5
+
+  # github api, ~/.github.create.repo
+  - 8e41f94c-743c-43ab-938b-45ae1a6caed9
+
+# Note that SSH keys are reference IDs, not the secrets themselves
+environment:
+  SSHKEY_GITHUB: 2d5edb98-1b22-4ccd-8540-a4ff88147ad0
+  SSHKEY_GITLAB: 7118a2fc-e9dc-422a-a5d0-7050a29dfac7
+
+tasks:
+  - pull-meta: |
+      git clone https://git.sr.ht/~dgc/hut-meta .hut
+
+  - convert-hg-git: |
+      ./.hut/convert-hg-git
+
+  - git-push: |
+      ./.hut/git-push
